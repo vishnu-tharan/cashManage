@@ -1254,3 +1254,117 @@ footer span:last-child {
     display: none;
   }
 }
+.inline-form {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 20px 0;
+}
+.inline-form input {
+  flex: 1;
+  min-width: 120px;
+}
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.history-row > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.history-row input[type="file"] {
+  max-width: 230px;
+}
+.goal {
+  margin-top: 22px;
+  padding-top: 15px;
+  border-top: 1px solid var(--line);
+}
+.goal progress {
+  margin: 12px 0;
+}
+.alerts {
+  margin-bottom: 22px;
+}
+.trend {
+  margin-top: 22px;
+}
+.shared-content {
+  margin-top: 25px;
+}
+.settings-grid form > .primary,
+.settings-grid form > button {
+  margin-top: 16px;
+}
+.sidebar {
+  overflow-y: auto;
+}
+.sidebar-bottom {
+  padding-top: 22px;
+}
+.workspace {
+  margin: 18px 0;
+  padding: 15px 8px;
+}
+nav {
+  gap: 3px;
+}
+nav button {
+  padding: 10px 12px;
+}
+.privacy {
+  padding: 12px;
+}
+.privacy p {
+  margin-top: 3px;
+}
+.modal code {
+  overflow-wrap: anywhere;
+}
+.card code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.modal small {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .history-row {
+    flex-wrap: wrap;
+  }
+  .history-row > div:first-child {
+    flex-basis: 100%;
+  }
+  .rate {
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .inline-form {
+    flex-direction: column;
+  }
+  .settings-grid .card {
+    min-width: 0;
+  }
+}
+.input-dialog {
+  z-index: 30;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+.dialog-message {
+  font-size: 14px;
+  margin-top: 20px;
+}
+.input-dialog .field span {
+  font-size: 13px;
+  line-height: 1.7;
+}

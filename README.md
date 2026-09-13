@@ -1,81 +1,110 @@
 # CashManage
 
-A responsive React / Vite cashbook app with an Express / SQLite account server. The original database is preserved. The old unauthenticated transaction routes are no longer exposed.
+Private cashbooks for web and mobile, with encrypted offline storage and an Express/SQLite account server. The existing local database is preserved. No bank transactions or actual payments are executed by this app.
 
-## Run
+## Run locally
 
-Use Node 22.14 or newer (a maintained Node LTS release is recommended).
+Use Node 22.14 or newer and a maintained Node LTS release for production.
 
 ```powershell
 cd client
-npm install
+npm ci
 npm run build
 cd ../server
-npm install
+npm ci
 $env:APP_ORIGIN='http://localhost:3000'
 npm start
 ```
 
-Open http://localhost:3000. For development, run `npm run dev` in both folders; use http://localhost:5173 and leave APP_ORIGIN unset (or set it to that URL). Vite proxies /api to port 3000.
+Open http://localhost:3000. For development run `npm run dev` in both folders and use http://localhost:5173, with APP_ORIGIN unset or set to that URL. Vite proxies /api to port 3000. The production server serves both the frontend and API.
 
-On this machine the npm PowerShell wrapper points to a missing file. If `npm` fails, substitute `node 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js'` for `npm`.
+On this machine the npm wrapper points to a missing file. If `npm` fails, replace it with `node 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js'`.
 
-## Features
+## Workspace features
 
-- Unique case-insensitive usernames, sign-in, guest workspace and editable display name/default currency.
-- AES-256-GCM encrypted account vaults and backups, PBKDF2-SHA256 with 600,000 iterations, separately derived authentication proof, server-side scrypt hashing.
-- HttpOnly SameSite cookies, 24-hour server sessions, configurable local inactivity lock, list/revoke all online sessions, remove local copies.
-- Personal, shopping, savings, borrowed and lent cashbooks, independent currencies and monthly expense budgets.
-- Income in green; expenses in red. Edit/delete entries, categories, description, people and due dates.
-- Currency-separated balances, cash flow bars, category spending, search and type/cashbook/date filters.
-- Month, year, all-time and custom date reports. For another month/year, use custom start/end dates. PDF / print uses the browser's Save as PDF destination. CSV export respects the same filters.
-- Encrypted download/restore and Google Drive app-data backups.
-- Indicative Frankfurter rates with dated offline cache; missing currencies produce a clear error instead of an invented rate.
-- Responsive light/dark design and installable PWA shell. This is a mobile web app, not an Android/iOS store binary.
+| Area | Features |
+| --- | --- |
+| Overview / Transactions | Currency-separated balances, income in green, expenses in red, descriptions/categories, people/due dates, cashbook/type/date/search filters, edit and delete |
+| Cashbooks | Personal, shopping, savings, borrowed and lent purposes, fixed currency per book, monthly expense budget |
+| Planning | Paired wallet transfers (including actual received amounts for different currencies), recurring schedules, debt principal and partial repayments, overdue balances, savings targets and contribution progress, budget alerts, monthly comparisons |
+| Import & history | CSV bank statement import with column mapping and preview; legacy JSON import; duplicate checks; per-row validation; recent activity and transaction undo |
+| Receipts | JPEG, PNG and PDF attachments stored inside the encrypted vault; download/remove; 300 KB each and 1 MB of active attachments total |
+| Reports | Filtered downloadable multi-page PDF statements, browser Print / Save as PDF, CSV export, cash-flow bars and category spending |
+| Shared | Separate encrypted shared books with owner/editor/viewer access enforced by the server |
+| Settings | Editable profile, base currency preference, dark/light theme, inactivity timeout, sessions, MFA, recovery keys, password changes, backups, indicative currency rates |
 
-## Offline and syncing
+Transfers affect cashbook balances but are excluded from income, spending, category totals and budget alerts. Deleting a transfer removes both sides. Linked debt entries are managed through Planning and can be undone through history, preserving consistency.
 
-Load the production build online once so the service worker can cache its shell. Sign in online once to save an encrypted account copy on that device. Later choose Offline unlock using the same username/password. Account edits save encrypted on the device; press Sync when connected. Sync is explicit, not automatic background syncing. Guest data is only in memory and disappears on reload or lock: export a password-protected backup before leaving.
+Recurring schedules support weekly, monthly and yearly dates. Month-end schedules keep their original anchor (January 31 → February 28/29 → March 31). Due entries post once while the unlocked app is running. The app checks every 10 seconds; it does not post in the background while closed. Paused schedules catch up from their next date when resumed. Catch-up batches are bounded.
 
-Revisions prevent silent overwrites when two devices edit the account. If Sync reports a conflict, first export the device backup. Then remove the local vault, sign in online to load the current server copy and reconcile your changes. Restore replaces the whole vault; there is no automatic transaction merge.
+Savings contributions earmark progress; they do not transfer or spend wallet cash. Budget alerts appear in-app at 80% and above; they are not push/email notifications. Debt repayments are cashbook records, not real payments.
 
-Offline device copies cannot be remotely erased or revoked. Signing out all sessions revokes server access. A user with the password and an existing offline copy can still decrypt it. No password reset/recovery or password rotation UI is implemented; keep passwords and backups safe.
+History retains up to 200 events and trims older events to keep encrypted backups within storage limits. Undo refuses to overwrite a transaction changed later. Undo repayments before undoing their original debt. This is recoverable local history, not an immutable audit ledger. Attachments may reduce retained history due to storage limits. OCR extraction is not included.
+
+## Offline, sync and conflicts
+
+Load the production build online once, allowing the service worker to cache all application assets. Sign in online once to save an encrypted account copy. Later choose Offline unlock with the same username/password. Offline edits are encrypted locally. Guest data is memory-only and disappears on reload/lock: download an encrypted backup before leaving.
+
+While unlocked and online, the app attempts synchronization every 10 seconds. The Sync button remains available. Revisions prevent silent last-write-wins overwrites. A stale revision opens a conflict review showing local and cloud differences. Export the device backup, select each version to keep, and save the resolution. Entries present on only one side are retained by default; deleted transactions require an explicit Delete selection. Both sides of a transfer and related debt entries must remain consistent. Validation occurs before changing the saved revision. A further remote edit causes another conflict instead of being overwritten.
+
+Opening multiple tabs is detected: if another tab updates the local vault, this tab locks so it cannot keep editing stale data. Removing a saved local copy loses unsynced changes, so export or sync first.
+
+Online session revocation cannot erase an existing offline copy. After a password change on another device, preserve an old offline copy with its original password before removing it and signing in again. Old backups stay encrypted with their original password.
+
+## Security and recovery
+
+- Account vaults and backups use AES-256-GCM with PBKDF2-SHA256 (600,000 iterations). Authentication uses a separate derived proof, hashed with server-side scrypt. Decryption keys are in memory while unlocked; raw keys are not stored unencrypted.
+- HttpOnly SameSite cookies, 24-hour sessions, origin checks on mutations, security headers, body limits and authentication/security endpoint rate limiting are enabled.
+- Settings → Account protection → Set up authenticator: add the displayed setup key to an authenticator app as a 6-digit, 30-second TOTP, then verify. Login requires a fresh code. Used codes cannot be replayed. Enabling MFA revokes other sessions. MFA protects online authentication, not password-based offline access.
+- Generate a recovery-key file after signing in. A random 256-bit recovery key wraps the account encryption key; the server stores a hash of its proof and the encrypted wrapper. The key can decrypt the latest synced vault and reset the password/MFA. Keep the downloaded file offline and private.
+- Recover account with recovery key is available from the login screen. Successful recovery rotates encryption/password credentials, revokes sessions, and clears MFA and the old recovery key. Re-enable MFA and generate a new key afterward.
+- Changing a password requires the current password and MFA if enabled, requires a clean synced revision, re-encrypts the vault, revokes sessions and invalidates the recovery key. Generate a new recovery key afterward.
+- MFA seeds are encrypted at rest using a randomly generated server key stored in `server/.mfa-key` (or MFA_KEY_PATH). Back up this key securely with the database and keep it out of Git. Losing it prevents verification of existing MFA seeds; recovery keys remain a separate recovery path.
+
+Encryption protects stored data, not data displayed in an unlocked or compromised browser. Account registration is open; rate limits are process-local and reset on restart. Add durable abuse controls and deployment monitoring before a public rollout. Dependency audits and automated tests are not a penetration test or security certification.
+
+## Shared cashbooks
+
+Shared books are separate from private wallets. Create a shared book with a distinct passphrase, then add existing account usernames as viewer/editor. Owners manage membership; viewers can read but cannot write; editors can add entries. Updates use revisions to reject simultaneous overwrites. Reload/unlock the shared book after a conflict.
+
+Share the passphrase with members through your own trusted channel. The application does not send invitations or messages. Book contents are encrypted; book names and membership metadata are visible to the server. Removing a member blocks future server access but cannot erase downloaded copies or make that member forget the passphrase. Choose the shared currency when creating the book. Shared books require an online session; they do not have private-vault offline editing or automatic key distribution.
+
+## Imports and reports
+
+CSV supports a single amount column (positive income/negative expense when direction is absent) and an optional direction column using income/credit/in or expense/outcome/debit/out. Date format is YYYY-MM-DD. Map bank-specific column headers in the preview. Separate debit/credit columns should first be combined into a signed amount column. Invalid rows are reported and skipped; review the preview before importing valid entries. Duplicate matching uses book/date/type/amount/description; identical legitimate entries need manual review.
+
+For legacy data, run `node export-legacy.js ../legacy-transactions.json` from server. Import that file in Import & history and choose the destination currency/book. This export is plaintext: store it privately. Original shared records have no owner and are not automatically assigned to new accounts.
+
+Reports use the selected cashbook, currency, direction, search and date range. For a previous month or year choose custom start/end dates. Direct PDF uses a built-in Latin font; for Sinhala, Tamil and other scripts use Print → Save as PDF to preserve browser-rendered text. CSV transfer rows are identified and cannot be imported as ordinary cash flow: recreate those through Planning. PDF/CSV exports are plaintext.
 
 ## Google Drive setup
 
-1. Create a Google Cloud project, enable the Google Drive API, configure the OAuth consent screen and add test users if the app is in testing.
-2. Create an OAuth client of type Web application. Add the exact app origin (e.g. http://localhost:3000 and your HTTPS production origin) as an authorized JavaScript origin.
-3. Copy `client/.env.example` to `client/.env`, set VITE_GOOGLE_CLIENT_ID, then rebuild the client.
-4. Settings → Back up to Google Drive opens Google's consent flow. Only the `drive.appdata` scope is requested. Tokens stay in memory and are not persisted. Each backup creates a new encrypted file. Restore selects the latest app-data backup, which requires its original encryption password.
+1. Create a Google Cloud project; enable Drive API; configure the OAuth consent screen and test users as needed.
+2. Create a Web application OAuth client. Add the exact app origin as an authorized JavaScript origin (e.g. http://localhost:3000 and the HTTPS production origin).
+3. Copy client/.env.example to client/.env, set VITE_GOOGLE_CLIENT_ID and rebuild.
+4. Settings → Back up to Google Drive requests only `drive.appdata`. Tokens stay in memory. Each backup is a separate encrypted file; restore selects the latest app-data backup and requires its original password.
 
-Live OAuth upload/restore requires your configured Google project and consent; it has not been tested against a real account here.
+Live Google authorization/upload/restore requires your configured Google project and consent. It has not been verified against a real Google account here. See https://developers.google.com/workspace/drive/api/guides/appdata. Currency rates come from https://frankfurter.dev/, with reference dates and cached offline results; rates may be delayed and some currencies unavailable.
 
-References: https://developers.google.com/workspace/drive/api/guides/appdata and https://frankfurter.dev/.
+## Deployment
 
-## Deploy online
+Build client/dist and run the server behind HTTPS on the same origin. Set NODE_ENV=production, APP_ORIGIN to the exact HTTPS origin, and optionally PORT, DB_PATH and MFA_KEY_PATH. Persist the SQLite database and MFA encryption key. Use a consistent SQLite backup process; do not run independently replicated SQLite copies. Secure cookies, installation and offline support require HTTPS (localhost is allowed during development).
 
-Build client/dist, run the server behind an HTTPS reverse proxy and mount persistent storage for SQLite. Set NODE_ENV=production and APP_ORIGIN to your exact HTTPS origin; optionally set PORT and DB_PATH. The server serves the client and API from the same origin. Configure the proxy to reject direct external access to the Node port. The app does not trust forwarded IP headers by default; configure proxy trust narrowly before using proxy-derived client IP rate limits. In the default setup users behind one proxy share its authentication rate limit.
+The server does not trust forwarded IP headers by default. Configure trusted proxies narrowly if deploying behind a reverse proxy; otherwise users share the proxy's authentication rate limit. Restrict direct external access to the Node port.
 
-HTTPS is required for secure production cookies, Web Crypto and install/offline support (localhost is allowed for development). Do not deploy SQLite on ephemeral storage or use several independently replicated SQLite instances. Back up the database using a consistent SQLite backup process. The app is not yet hosted and no cloud resources have been created.
+Mobile support is an installable responsive PWA, not an Android/iOS store binary. No cloud resources have been provisioned and the project is not publicly hosted. Device installation and live Google OAuth still need environment-specific testing.
 
-## Existing data
-
-The original `server/cashmanage.db` and its transactions table are kept intact. Existing rows were shared and have no reliable owner. They are deliberately not assigned to a newly registered user. Export them locally with `node export-legacy.js ../legacy-transactions.json` from server; this creates a plaintext JSON archive, so store it privately. Import/reconciliation of these legacy records into a private cashbook is not automated.
-
-## Verification and boundaries
+## Verification
 
 ```powershell
 cd client
 npm run build
 npm run lint
 npm test
+npm audit
 cd ../server
 npm test
 npm audit
 ```
 
-Security tests use an in-memory database and cover unauthenticated access, cross-origin rejection, duplicate names, wrong credentials, account isolation, malformed vaults, stale revision rejection and session revocation. Crypto tests cover roundtrip restore, wrong passwords and ciphertext tampering. Dependency audit reports zero known vulnerabilities at implementation time; this is not a security certification or penetration test.
-
-Keep browser extensions and devices trusted: encryption protects stored data, not data displayed in an unlocked browser. Printed/CSV reports are plaintext. Account registration is open and rate limits are in-memory; add production monitoring, durable rate limiting and an account lifecycle policy before a public rollout. No bank connections, recurring posting, transfers, MFA, immutable audit ledger, password recovery, native store packaging or automatic conflict merge is claimed.
-
-Browser smoke checks also verified guest transaction totals, the dark mobile layout, and reopening the cached app shell with the server stopped. Offline encrypted editing is covered at the crypto/storage level; real-device installation and live Google OAuth still require end-to-end testing.
+Tests cover encryption/tampering, currency precision, balanced transfers, recurrence idempotency/month-end behavior, repayment limits, undo conflicts, CSV errors/duplicates, merge selections, budgets, PDF pagination, private account isolation, TOTP reference vectors/replay protection, recovery/key rotation, session revocation and shared role enforcement. Server tests use isolated in-memory databases. Browser smoke checks exercise the guest UI; real multi-device installation and Google integration are separate deployment checks.

@@ -1,3 +1,18 @@
+import { getDialog } from "./dialogs";
+import { ask, confirmAction } from "./dialogs";
+import { validateData } from "./storage";
+import Features from "./Features";
+import SharedBooks from "./SharedBooks";
+import AccountSecurity from "./AccountSecurity";
+import { recoverAccount } from "./recovery";
+import {
+  upgrade,
+  record,
+  postRecurring,
+  mergeVersions,
+  budgetAlerts,
+} from "./ledger";
+import { exportPDF } from "./reports";
 import { useEffect, useRef, useState } from "react";
 import {
   Wallet,
@@ -95,6 +110,10 @@ export default function App() {
     [sessions, setSessions] = useState([]),
     [rates, setRates] = useState(null),
     [menu, setMenu] = useState(false);
+  const [conflict, setConflict] = useState(null);
+  const operationRunning = useRef(false);
+  const syncRunning = useRef(false),
+    latest = useRef(null);
   const [authMode, setAuthMode] = useState("login");
   const current = useRef(null);
   const install = useRef(null);
@@ -169,6 +188,7 @@ export default function App() {
     setData(null);
     setModal(null);
     setSessions([]);
+    setConflict(null);
     setMessage("Vault locked.");
   };
   useEffect(() => {
@@ -193,6 +213,8 @@ export default function App() {
     };
   }, [session, data?.profile.timeout]);
   const act = async (fn) => {
+    if (operationRunning.current) return;
+    operationRunning.current = true;
     setBusy(true);
     setMessage("");
     try {
@@ -200,6 +222,7 @@ export default function App() {
     } catch (e) {
       setMessage(e.message || "Something went wrong");
     } finally {
+      operationRunning.current = false;
       setBusy(false);
     }
   };
@@ -232,6 +255,7 @@ export default function App() {
         const result = await api("/auth/login", "POST", {
           username,
           proof: await proof(username, password),
+          otp: String(form.get("otp") || ""),
         });
         if (!saved?.dirty) saved = { ...result, dirty: false };
       }
@@ -246,7 +270,7 @@ export default function App() {
       const s = { username, key, salt: saved.vault.salt, guest: false };
       current.current = s;
       setSession(s);
-      setData(opened);
+      setData(upgrade(opened));
       setUnit(opened.profile.currency);
       setStatus(
         saved.dirty
@@ -257,16 +281,26 @@ export default function App() {
       );
     });
   }
-  async function save(next) {
+  async function save(next, label = "Updated workspace", revision) {
+    next = validateData(record(data, next, label));
     const s = current.current;
     if (!s) throw new Error("Please unlock your vault");
     if (!s.guest) {
       const old = JSON.parse(localStorage.getItem(`cm:${s.username}`));
       const vault = await seal(next, s.key, s.salt);
+      if (JSON.stringify(vault).length > 4500000)
+        throw new Error(
+          "Vault is too large. Remove old receipts or export and clear activity history.",
+        );
       if (current.current !== s) return;
       localStorage.setItem(
         `cm:${s.username}`,
-        JSON.stringify({ ...old, vault, dirty: true }),
+        JSON.stringify({
+          ...old,
+          vault,
+          revision: revision ?? old.revision,
+          dirty: true,
+        }),
       );
     }
     if (current.current !== s) return;
@@ -274,38 +308,96 @@ export default function App() {
     setStatus(s.guest ? "Guest · temporary" : "Saved on device · sync pending");
   }
   async function sync() {
-    const s = current.current;
-    if (s.guest)
-      throw new Error(
-        "Guest data stays in memory. Export a backup before leaving.",
-      );
-    const saved = JSON.parse(localStorage.getItem(`cm:${s.username}`));
-    if (saved.dirty) {
-      const result = await api("/vault", "PUT", {
-        vault: saved.vault,
-        revision: saved.revision,
-      });
-      localStorage.setItem(
-        `cm:${s.username}`,
-        JSON.stringify({ ...saved, ...result, dirty: false }),
-      );
-    } else {
-      const result = await api("/vault");
-      const opened = await unseal(result.vault, s.key);
-      if (current.current !== s) return;
-      localStorage.setItem(
-        `cm:${s.username}`,
-        JSON.stringify({ ...result, dirty: false }),
-      );
-      setData(opened);
+    if (syncRunning.current || conflict) return;
+    syncRunning.current = true;
+    try {
+      const s = current.current;
+      if (s.guest)
+        throw new Error(
+          "Guest data stays in memory. Export a backup before leaving.",
+        );
+      const saved = JSON.parse(localStorage.getItem(`cm:${s.username}`));
+      if (saved.dirty) {
+        const result = await api("/vault", "PUT", {
+          vault: saved.vault,
+          revision: saved.revision,
+        });
+        if (current.current !== s) return;
+        const newest = JSON.parse(localStorage.getItem(`cm:${s.username}`));
+        const changed = newest.vault.cipher !== saved.vault.cipher;
+        localStorage.setItem(
+          `cm:${s.username}`,
+          JSON.stringify({ ...newest, ...result, dirty: changed }),
+        );
+      } else {
+        const result = await api("/vault");
+        const opened = await unseal(result.vault, s.key);
+        if (current.current !== s) return;
+        if (JSON.parse(localStorage.getItem(`cm:${s.username}`)).dirty) return;
+        localStorage.setItem(
+          `cm:${s.username}`,
+          JSON.stringify({ ...result, dirty: false }),
+        );
+        setData(upgrade(opened));
+      }
+      setStatus("Synced");
+    } catch (e) {
+      if (e.status === 409 && current.current) {
+        const active = current.current;
+        const remote = await api("/vault");
+        if (current.current !== active) return;
+        const remoteData = await unseal(remote.vault, active.key);
+        if (current.current !== active) return;
+        setConflict({ remote, remoteData, choices: {} });
+        setStatus("Sync conflict needs review");
+      } else throw e;
+    } finally {
+      syncRunning.current = false;
     }
-    setStatus("Synced");
-    setMessage("Encrypted account sync complete.");
   }
+  useEffect(() => {
+    latest.current = { data, session, busy, conflict, sync, save };
+  });
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      const value = latest.current;
+      if (
+        !value?.session ||
+        value.busy ||
+        getDialog() ||
+        operationRunning.current ||
+        value.conflict ||
+        syncRunning.current
+      )
+        return;
+      operationRunning.current = true;
+      try {
+        const posted = postRecurring(value.data, today());
+        if (posted.count) {
+          operationRunning.current = true;
+          await value.save(
+            posted.data,
+            `Posted ${posted.count} recurring entries`,
+          );
+          return;
+        }
+        if (!value.session.guest && navigator.onLine) await value.sync();
+      } catch (e) {
+        setStatus(
+          e.status === 401
+            ? "Online session expired; unlock online to reconnect"
+            : "Saved locally · sync unavailable",
+        );
+      } finally {
+        operationRunning.current = false;
+      }
+    }, 10000);
+    return () => clearInterval(timer);
+  }, []);
   async function backup() {
     if (!session.guest)
       return JSON.parse(localStorage.getItem(`cm:${session.username}`)).vault;
-    const password = window.prompt(
+    const password = await ask(
       "Choose a backup password (at least 12 characters). Keep it to restore this backup.",
     );
     if (!password || password.length < 12)
@@ -314,7 +406,7 @@ export default function App() {
     return seal(data, await derive(password, salt), salt);
   }
   async function restore(vault) {
-    const password = window.prompt("Enter the password used for this backup:");
+    const password = await ask("Enter the password used for this backup:");
     if (!password) return;
     let restored;
     try {
@@ -323,7 +415,7 @@ export default function App() {
       throw new Error("Invalid backup or incorrect password");
     }
     if (
-      window.confirm(
+      await confirmAction(
         "Replace your current cashbooks with this backup? Export your current data first if needed.",
       )
     ) {
@@ -384,7 +476,7 @@ export default function App() {
                 ? "Unlock the encrypted account saved on this device."
                 : "A clearer picture of your money starts here."}
             </p>
-            <form onSubmit={authenticate}>
+            <form id="login-form" onSubmit={authenticate}>
               <Field label="Unique username">
                 <input
                   name="username"
@@ -417,8 +509,8 @@ export default function App() {
               </Field>
               {authMode === "register" && (
                 <small>
-                  Your password encrypts your data. Keep it safe: there is no
-                  password recovery.
+                  Your password encrypts your data. There is no recovery without
+                  a recovery key. Generate one in Settings after signing in.
                 </small>
               )}
               <button className="primary wide" disabled={busy}>
@@ -429,11 +521,29 @@ export default function App() {
                     : "Unlock my cashbooks →"}
               </button>
             </form>
+            {authMode === "login" && (
+              <Field label="Authenticator code (if enabled)">
+                <input
+                  name="otp"
+                  form="login-form"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                />
+              </Field>
+            )}
+            <button
+              onClick={async () =>
+                act(async () => setMessage(await recoverAccount()))
+              }
+            >
+              Recover account with recovery key
+            </button>
             <div className="auth-links">
               {["login", "register", "offline"].map((m) => (
                 <button
                   key={m}
-                  onClick={() => setAuthMode(m)}
+                  onClick={async () => setAuthMode(m)}
                   disabled={authMode === m}
                 >
                   {m === "login"
@@ -447,11 +557,11 @@ export default function App() {
             <div className="divider">or explore first</div>
             <button
               className="wide"
-              onClick={() => {
+              onClick={async () => {
                 const s = { guest: true };
                 current.current = s;
                 setSession(s);
-                setData(initial());
+                setData(upgrade(initial()));
                 setStatus("Guest · temporary");
               }}
             >
@@ -487,19 +597,21 @@ export default function App() {
     })
     .sort((a, b) => b.date.localeCompare(a.date));
   const income = selected
-      .filter((t) => t.type === "income")
+      .filter((t) => t.type === "income" && !t.transfer)
       .reduce((s, t) => s + t.amount, 0),
     expense = selected
-      .filter((t) => t.type === "expense")
+      .filter((t) => t.type === "expense" && !t.transfer)
       .reduce((s, t) => s + t.amount, 0);
   const balance = data.transactions
     .filter((t) => currencyBooks.some((b) => b.id === t.book))
     .reduce((s, t) => s + (t.type === "income" ? t.amount : -t.amount), 0);
-  const categoryTotals = categories
+  const categoryTotals = [
+    ...new Set([...categories, ...selected.map((t) => t.category)]),
+  ]
     .map((c) => ({
       name: c,
       total: selected
-        .filter((t) => t.category === c && t.type === "expense")
+        .filter((t) => t.category === c && t.type === "expense" && !t.transfer)
         .reduce((s, t) => s + t.amount, 0),
     }))
     .filter((c) => c.total)
@@ -513,10 +625,10 @@ export default function App() {
     return {
       label: d.toLocaleDateString(undefined, { month: "short" }),
       income: ts
-        .filter((t) => t.type === "income")
+        .filter((t) => t.type === "income" && !t.transfer)
         .reduce((s, t) => s + t.amount, 0),
       expense: ts
-        .filter((t) => t.type === "expense")
+        .filter((t) => t.type === "expense" && !t.transfer)
         .reduce((s, t) => s + t.amount, 0),
     };
   });
@@ -526,6 +638,10 @@ export default function App() {
     ["Cashbooks", BookOpen],
     ["Transactions", ArrowDownLeft],
     ["Reports", ChartNoAxesCombined],
+    ["Planning", Wallet],
+    ["Import & history", BookOpen],
+    ["Receipts", BookOpen],
+    ["Shared", BookOpen],
     ["Settings", Settings],
   ];
   function setRange(value) {
@@ -584,23 +700,32 @@ export default function App() {
               </td>
               <td className="no-print">
                 <button
+                  disabled={!!t.transfer || !!t.debt}
                   aria-label={`Edit ${t.note || t.category}`}
                   className="icon"
-                  onClick={() => setModal({ kind: "transaction", value: t })}
+                  onClick={async () =>
+                    setModal({ kind: "transaction", value: t })
+                  }
                 >
                   <Pencil size={15} />
                 </button>
                 <button
                   aria-label={`Delete ${t.note || t.category}`}
                   className="icon"
-                  disabled={busy}
-                  onClick={() =>
-                    window.confirm("Delete this transaction?") &&
+                  disabled={busy || !!t.debt}
+                  onClick={async () =>
+                    (await confirmAction(
+                      t.transfer
+                        ? "Delete both sides of this wallet transfer?"
+                        : "Delete this transaction? You can restore it from Import & history.",
+                    )) &&
                     act(() =>
                       save({
                         ...data,
-                        transactions: data.transactions.filter(
-                          (x) => x.id !== t.id,
+                        transactions: data.transactions.filter((x) =>
+                          t.transfer
+                            ? x.transfer !== t.transfer
+                            : x.id !== t.id,
                         ),
                       }),
                     )
@@ -623,7 +748,7 @@ export default function App() {
             No transactions match this view. Add your first entry or adjust the
             filters.
           </p>
-          <button onClick={() => setModal({ kind: "transaction" })}>
+          <button onClick={async () => setModal({ kind: "transaction" })}>
             <Plus size={16} /> Add transaction
           </button>
         </div>
@@ -656,7 +781,7 @@ export default function App() {
             <button
               className={page === n ? "active" : ""}
               key={n}
-              onClick={() => {
+              onClick={async () => {
                 setPage(n);
                 setMenu(false);
               }}
@@ -680,12 +805,12 @@ export default function App() {
             </p>
           </div>
           <button
-            onClick={() => {
+            onClick={async () => {
               if (
                 !session.guest ||
-                window.confirm(
+                (await confirmAction(
                   "Guest data will be cleared. Have you exported a backup?",
-                )
+                ))
               ) {
                 api("/logout", "POST").catch(() => {});
                 lock();
@@ -703,7 +828,7 @@ export default function App() {
           <button
             className="icon mobile-menu"
             aria-label="Toggle navigation"
-            onClick={() => setMenu(!menu)}
+            onClick={async () => setMenu(!menu)}
           >
             <Menu />
           </button>
@@ -718,7 +843,9 @@ export default function App() {
             <button
               className="icon"
               aria-label="Toggle theme"
-              onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+              onClick={async () =>
+                setTheme(theme === "light" ? "dark" : "light")
+              }
             >
               {theme === "light" ? <Moon size={19} /> : <Sun size={19} />}
             </button>
@@ -742,7 +869,7 @@ export default function App() {
             </div>
             <button
               className="primary no-print"
-              onClick={() => setModal({ kind: "transaction" })}
+              onClick={async () => setModal({ kind: "transaction" })}
             >
               <Plus size={18} />
               Add transaction
@@ -754,7 +881,7 @@ export default function App() {
               <button
                 aria-label="Dismiss message"
                 className="icon"
-                onClick={() => setMessage("")}
+                onClick={async () => setMessage("")}
               >
                 <X size={16} />
               </button>
@@ -775,7 +902,7 @@ export default function App() {
               />
               <button
                 disabled={busy || !online || session.guest}
-                onClick={() => act(sync)}
+                onClick={async () => act(sync)}
               >
                 <RefreshCw size={15} />
                 Sync
@@ -999,11 +1126,18 @@ export default function App() {
                     <p>Every entry, a little more clarity.</p>
                   </div>
                   <div className="no-print">
-                    <button onClick={() => window.print()}>
-                      <Download size={16} /> PDF / print
-                    </button>
                     <button
-                      onClick={() => {
+                      onClick={() =>
+                        act(async () =>
+                          exportPDF(data, selected, unit, from, to),
+                        )
+                      }
+                    >
+                      <Download size={16} /> Download PDF
+                    </button>
+                    <button onClick={async () => window.print()}>Print</button>
+                    <button
+                      onClick={async () => {
                         const rows = [
                           [
                             "Date",
@@ -1017,7 +1151,9 @@ export default function App() {
                           ...selected.map((t) => [
                             t.date,
                             data.books.find((b) => b.id === t.book)?.name,
-                            t.type,
+                            t.transfer
+                              ? `transfer ${t.type === "income" ? "in" : "out"}`
+                              : t.type,
                             t.category,
                             t.note,
                             unit,
@@ -1056,7 +1192,7 @@ export default function App() {
             <>
               <div className="section-heading">
                 <h3>A place for every purpose</h3>
-                <button onClick={() => setModal({ kind: "book" })}>
+                <button onClick={async () => setModal({ kind: "book" })}>
                   <Plus size={17} />
                   New cashbook
                 </button>
@@ -1072,6 +1208,7 @@ export default function App() {
                     .filter(
                       (t) =>
                         t.type === "expense" &&
+                        !t.transfer &&
                         t.date.startsWith(today().slice(0, 7)),
                     )
                     .reduce((s, t) => s + t.amount, 0);
@@ -1084,7 +1221,9 @@ export default function App() {
                         <button
                           className="icon"
                           aria-label={`Edit ${b.name}`}
-                          onClick={() => setModal({ kind: "book", value: b })}
+                          onClick={async () =>
+                            setModal({ kind: "book", value: b })
+                          }
                         >
                           <Pencil size={16} />
                         </button>
@@ -1109,7 +1248,7 @@ export default function App() {
                         </>
                       )}
                       <button
-                        onClick={() => {
+                        onClick={async () => {
                           setUnit(b.currency);
                           setBook(b.id);
                           setPage("Transactions");
@@ -1130,8 +1269,24 @@ export default function App() {
               </div>
             </>
           )}
+          {["Planning", "Import & history", "Receipts"].includes(page) && (
+            <Features data={data} save={save} act={act} page={page} />
+          )}
+          {page === "Shared" && <SharedBooks session={session} act={act} />}
+          {page === "Overview" &&
+            budgetAlerts(data, today().slice(0, 7)).map((b) => (
+              <div className="notice" key={b.id}>
+                {b.name}: {b.percent}% of monthly budget used
+              </div>
+            ))}
           {page === "Settings" && (
             <div className="settings-grid">
+              <AccountSecurity
+                session={session}
+                data={data}
+                act={act}
+                lock={lock}
+              />
               <section className="card">
                 <h3>Your profile</h3>
                 <p>Make this space your own.</p>
@@ -1197,7 +1352,7 @@ export default function App() {
                 <div className="settings-actions">
                   <button
                     disabled={busy}
-                    onClick={() =>
+                    onClick={async () =>
                       act(async () =>
                         download(
                           `cashmanage-${today()}.json`,
@@ -1228,7 +1383,7 @@ export default function App() {
                   </label>
                   <button
                     disabled={busy || !online}
-                    onClick={() =>
+                    onClick={async () =>
                       act(async () => {
                         await drive("backup", await backup());
                         setMessage("Encrypted backup saved to Google Drive");
@@ -1240,14 +1395,14 @@ export default function App() {
                   </button>
                   <button
                     disabled={busy || !online}
-                    onClick={() =>
+                    onClick={async () =>
                       act(async () => restore(await drive("restore")))
                     }
                   >
                     Restore latest Drive backup
                   </button>
                   <button
-                    onClick={() =>
+                    onClick={async () =>
                       act(async () => {
                         if (!install.current)
                           throw new Error(
@@ -1274,7 +1429,7 @@ export default function App() {
                 </p>
                 <button
                   disabled={session.guest || busy}
-                  onClick={() =>
+                  onClick={async () =>
                     act(async () => setSessions(await api("/sessions")))
                   }
                 >
@@ -1288,7 +1443,7 @@ export default function App() {
                 ))}
                 <button
                   disabled={session.guest || busy}
-                  onClick={() =>
+                  onClick={async () =>
                     act(async () => {
                       await api("/sessions", "DELETE");
                       lock();
@@ -1303,9 +1458,9 @@ export default function App() {
                 </small>
                 <button
                   disabled={session.guest}
-                  onClick={() => {
+                  onClick={async () => {
                     if (
-                      window.confirm(
+                      await confirmAction(
                         "Remove this device’s saved vault? Unsynced changes will be lost.",
                       )
                     ) {
@@ -1329,7 +1484,7 @@ export default function App() {
                 />
                 <button
                   disabled={busy}
-                  onClick={() =>
+                  onClick={async () =>
                     act(async () => {
                       const key = `cm-rates:${unit}`;
                       try {
@@ -1386,6 +1541,141 @@ export default function App() {
           </footer>
         </main>
       </div>
+      {conflict && (
+        <div className="modal-overlay">
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Resolve sync conflict"
+          >
+            <h2>Review device and cloud versions</h2>
+            <p>
+              Choose which values to keep. Entries present in only one version
+              are kept unless you select Delete. Download a backup before
+              resolving deletions or linked transfers.
+            </p>
+            <button
+              onClick={async () =>
+                act(async () =>
+                  download(
+                    "conflict-device-backup.json",
+                    JSON.stringify(await backup()),
+                  ),
+                )
+              }
+            >
+              Download device backup
+            </button>
+            <label className="field">
+              Profile
+              <select
+                onChange={(e) =>
+                  setConflict({
+                    ...conflict,
+                    choices: { ...conflict.choices, profile: e.target.value },
+                  })
+                }
+              >
+                <option value="remote">Cloud profile</option>
+                <option value="local">Device profile</option>
+              </select>
+            </label>
+            {["books", "transactions", "recurring", "goals", "debts"].flatMap(
+              (field) => {
+                const localMap = new Map(
+                    (data[field] || []).map((x) => [x.id, x]),
+                  ),
+                  remoteMap = new Map(
+                    (conflict.remoteData[field] || []).map((x) => [x.id, x]),
+                  );
+                return [...new Set([...localMap.keys(), ...remoteMap.keys()])]
+                  .filter(
+                    (id) =>
+                      JSON.stringify(localMap.get(id)) !==
+                      JSON.stringify(remoteMap.get(id)),
+                  )
+                  .map((id) => (
+                    <div className="field" key={field + id}>
+                      <strong>
+                        {field}:{" "}
+                        {localMap.get(id)?.note ||
+                          localMap.get(id)?.name ||
+                          remoteMap.get(id)?.note ||
+                          id}
+                      </strong>
+                      <small>
+                        Device:{" "}
+                        {JSON.stringify(localMap.get(id) || "absent").slice(
+                          0,
+                          250,
+                        )}
+                      </small>
+                      <small>
+                        Cloud:{" "}
+                        {JSON.stringify(remoteMap.get(id) || "absent").slice(
+                          0,
+                          250,
+                        )}
+                      </small>
+                      <select
+                        value={conflict.choices[field + ":" + id] || "remote"}
+                        onChange={(e) =>
+                          setConflict({
+                            ...conflict,
+                            choices: {
+                              ...conflict.choices,
+                              [field + ":" + id]: e.target.value,
+                            },
+                          })
+                        }
+                      >
+                        <option value="remote">
+                          Cloud value (keep device-only entry)
+                        </option>
+                        <option value="local">Device value</option>
+                        {field === "transactions" && (
+                          <option value="delete">Delete entry</option>
+                        )}
+                      </select>
+                    </div>
+                  ));
+              },
+            )}
+            <button
+              className="primary"
+              onClick={async () =>
+                act(async () => {
+                  const merged = mergeVersions(
+                    data,
+                    conflict.remoteData,
+                    conflict.choices,
+                  );
+                  await save(
+                    merged,
+                    "Resolved synchronization conflict",
+                    conflict.remote.revision,
+                  );
+                  setConflict(null);
+                  setMessage(
+                    "Merged locally. Automatic sync will upload the result.",
+                  );
+                })
+              }
+            >
+              Save resolution
+            </button>
+            <button
+              onClick={async () => {
+                setConflict(null);
+                lock();
+              }}
+            >
+              Lock and resolve later
+            </button>
+          </section>
+        </div>
+      )}
       {modal && (
         <div
           className="modal-overlay"
@@ -1405,7 +1695,7 @@ export default function App() {
               <button
                 aria-label="Close dialog"
                 className="icon"
-                onClick={() => setModal(null)}
+                onClick={async () => setModal(null)}
               >
                 <X />
               </button>
@@ -1437,6 +1727,7 @@ export default function App() {
                     if (!Number.isSafeInteger(amount) || amount <= 0)
                       throw new Error("Enter a valid positive amount");
                     const value = {
+                      ...modal.value,
                       ...f,
                       amount,
                       id: modal.value?.id || crypto.randomUUID(),

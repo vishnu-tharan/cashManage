@@ -46,7 +46,7 @@ setInterval(() => {
   for (const [key, value] of attempts)
     if (value.until < Date.now()) attempts.delete(key);
 }, 60000).unref();
-app.use("/api/auth", (req, res, next) => {
+app.use(["/api/auth", "/api/security"], (req, res, next) => {
   const key = req.ip;
   const entry = attempts.get(key) || { count: 0, until: Date.now() + 900000 };
   if (entry.until < Date.now()) {
@@ -68,6 +68,20 @@ const validVault = (v) =>
   typeof v.cipher === "string" &&
   /^[a-f0-9]+$/.test(v.cipher) &&
   v.cipher.length <= 9000000;
+const all = (sql, args = []) =>
+  new Promise((resolve, reject) =>
+    db.all(sql, args, (e, rows) => (e ? reject(e) : resolve(rows))),
+  );
+const features = require("./features")({
+  app,
+  run,
+  get,
+  all,
+  scrypt,
+  validVault,
+  hash,
+});
+features.publicRoutes();
 app.post("/api/auth/:action", async (req, res) => {
   const { username, proof, vault } = req.body;
   if (
@@ -101,6 +115,11 @@ app.post("/api/auth/:action", async (req, res) => {
       !crypto.timingSafeEqual(candidate, Buffer.from(user.password, "hex"))
     )
       return res.status(401).json({ error: "Incorrect username or password" });
+    if (!(await features.verifyMfa(username, req.body.otp)))
+      return res.status(401).json({
+        error:
+          "Authenticator code required or invalid (wait for a fresh code if already used)",
+      });
   } else return res.sendStatus(404);
   const token = crypto.randomBytes(32).toString("hex");
   await run("INSERT INTO sessions(token,username,expires) VALUES(?,?,?)", [
@@ -137,6 +156,7 @@ app.use("/api", async (req, res, next) => {
   req.token = session.token;
   next();
 });
+features.privateRoutes();
 app.get("/api/vault", async (req, res) => {
   const u = await get("SELECT vault,revision FROM users WHERE username=?", [
     req.username,
@@ -151,12 +171,10 @@ app.put("/api/vault", async (req, res) => {
     [JSON.stringify(req.body.vault), req.username, req.body.revision],
   );
   if (!result.changes)
-    return res
-      .status(409)
-      .json({
-        error:
-          "Another device changed this account. Export a backup before loading the cloud version.",
-      });
+    return res.status(409).json({
+      error:
+        "Another device changed this account. Export a backup before loading the cloud version.",
+    });
   res.json({ revision: req.body.revision + 1 });
 });
 app.get("/api/sessions", async (req, res) => {
@@ -206,6 +224,7 @@ async function start() {
     "CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,username TEXT NOT NULL,expires INTEGER NOT NULL)",
   );
   await run("DELETE FROM sessions WHERE expires<?", [Date.now()]);
+  await features.init();
   return app.listen(process.env.PORT || 3000, () =>
     console.log("CashManage server ready"),
   );
