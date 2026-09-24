@@ -1,0 +1,16 @@
+services:
+  cashmanage:
+    build: .
+    container_name: cashmanage
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - APP_ORIGIN=${APP_ORIGIN:-http://localhost:3000}
+    volumes:
+      - cashmanage-data:/app/data
+
+volumes:
+  cashmanage-data:
